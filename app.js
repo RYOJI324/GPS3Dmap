@@ -1,5 +1,5 @@
 // アドベンチャーノート（ピン＋3Dフライオーバー）
-// v3: 日本語UI + Journal風デザイン + 写真の撮影時刻で自動割り当て + Flyover中オーバーレイ + JSON入出力 + 端末保存(IndexedDB)
+// v5: 日本語UI + Journal風デザイン + 写真の撮影時刻で自動割り当て + Flyover中オーバーレイ + JSON入出力 + 端末保存(IndexedDB)
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -636,7 +636,11 @@ function stopFlyover(ended=false){
   state.fly.raf = null;
   $("#btnFly").textContent = "フライオーバー再生 ▶";
   if(ended) toast("再生が完了しました。", 1800);
+
+  // 通常表示へ戻す（2D）＋全体が見えるように自動ズーム
   disableFlyMode();
+  // terrain解除直後は描画が落ち着くまで少し待つと気持ちよい
+  setTimeout(()=>{ try{ fitToPinsIfNeeded(); }catch(e){} }, 120);
 }
 
 function calcBearing(a,b){
