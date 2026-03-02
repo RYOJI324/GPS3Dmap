@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>アドベンチャーノート（ピン＋フライオーバー）</title>
+  <title>アドベンチャーノート（ピン軌跡）</title>
   <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
   <link rel="stylesheet" href="./style.css" />
 </head>
@@ -11,120 +11,75 @@
   <div id="app">
     <header class="topbar">
       <div class="brand">
-        <div class="logo">🗺️</div>
+        <div class="logo">🧭</div>
         <div class="titleblock">
           <div class="title">アドベンチャーノート</div>
-          <div class="subtitle">ピンで旅を記録して、3Dで飛ぶ</div>
+          <div class="subtitle">平面地図でピンをつないで軌跡を作る</div>
         </div>
       </div>
-
-      <div class="controls">
-        <button id="btnFly" class="btn">フライオーバー再生 ▶</button>
-
-        <div class="seg">
-          <label class="seglabel">再生時間</label>
-          <select id="durationMode" class="select">
-            <option value="auto">自動（推奨）</option>
-            <option value="30">30秒</option>
-            <option value="45">45秒</option>
-            <option value="60">60秒</option>
-            <option value="90">90秒</option>
-          </select>
-          <span id="durationHint" class="hint">自動: --秒</span>
-        </div>
+      <div class="top-actions">
+        <button id="btnSave" class="btn ghost">端末に保存</button>
+        <button id="btnExport" class="btn ghost">JSON書き出し</button>
+        <label class="btn ghost file">
+          JSON読み込み
+          <input id="fileImportJson" type="file" accept="application/json" />
+        </label>
       </div>
     </header>
 
     <main class="main">
-      <aside class="panel">
-        <div class="section">
-          <div class="sectionTitle">📌 タイムライン</div>
-          <div id="timeline" class="timeline"></div>
-          <div class="smallhelp">
-            ヒント：ピンをタップすると地図が移動。長押しで削除。
-          </div>
+      <div id="map" class="map"></div>
+
+      <!-- 右下フローティング -->
+      <div class="fab">
+        <button id="btnPin" class="btn primary big">現在地を記録</button>
+        <div class="row">
+          <button id="btnAuto" class="btn">自動記録：開始</button>
+          <select id="autoInterval" class="select">
+            <option value="180000">3分ごと</option>
+            <option value="60000">1分ごと</option>
+            <option value="300000">5分ごと</option>
+          </select>
         </div>
+      </div>
 
-        <div class="section">
-          <div class="sectionTitle">📝 メモ・写真</div>
-          <textarea id="memoBox" class="textarea" placeholder="選択中のピンにメモを入力（例：ここで昼ごはん）"></textarea>
-
-          <div class="row">
-            <label class="filebtn">
-              <input id="photoInput" type="file" accept="image/*" multiple />
-              写真を読み込む（撮影時刻で自動割り当て）
+      <!-- 下部パネル -->
+      <section class="panel">
+        <div class="panel-head">
+          <div class="panel-title">タイムライン</div>
+          <div class="panel-actions">
+            <label class="btn file">
+              写真を読み込む（時刻/位置で自動配置）
+              <input id="filePhotos" type="file" accept="image/*" multiple />
             </label>
-          </div>
-
-          <div id="photoStrip" class="photostrip"></div>
-          <div class="smallhelp">
-            ※撮影時刻（EXIF）が読めない写真は、いちばん近い時刻のピンに割り当てます。
-          </div>
-        </div>
-
-        <div class="section">
-          <div class="sectionTitle">💾 保存とバックアップ</div>
-
-          <div class="row two">
-            <button id="btnSave" class="btn">端末に保存</button>
-            <button id="btnNew" class="btn ghost">新しい旅（クリア）</button>
-          </div>
-
-          <div class="row">
-            <select id="savedSelect" class="select wide"></select>
-          </div>
-          <div class="row two">
+            <select id="savedSelect" class="select">
+              <option value="">保存済みデータ…</option>
+            </select>
             <button id="btnLoad" class="btn">読み込む</button>
-            <button id="btnDelete" class="btn danger ghost">削除</button>
-          </div>
-
-          <div class="row two">
-            <button id="btnExport" class="btn ghost">JSON書き出し</button>
-            <label class="filebtn ghost">
-              <input id="jsonInput" type="file" accept="application/json" />
-              JSON読み込み
-            </label>
-          </div>
-
-          <div class="smallhelp">
-            端末に保存したデータを読み込むと、いつでも再生（再動画化）できます。
+            <button id="btnDelete" class="btn danger">削除</button>
+            <button id="btnClear" class="btn ghost">全消去</button>
           </div>
         </div>
 
-        <div class="section">
-          <div class="sectionTitle">ℹ️ 使い方</div>
-          <ol class="howto">
-            <li>「現在地を記録」でピンを打つ</li>
-            <li>必要ならメモや写真を追加</li>
-            <li>「フライオーバー再生」で3Dマップを自動再生</li>
-            <li>動画にしたい場合は <b>iPhoneの画面収録</b> を使う</li>
-          </ol>
-        </div>
-      </aside>
+        <div id="timeline" class="timeline"></div>
 
-      <section class="mapWrap">
-        <div id="map" class="map"></div>
-
-        <!-- Floating action button (mobile friendly) -->
-        <button id="btnPin" class="fab" aria-label="現在地を記録">現在地を記録</button>
-
-        <div id="toast" class="toast hidden"></div>
-
-        <div id="overlay" class="overlay hidden">
-          <div class="overlayCard">
-            <div class="overlayTop">
-              <div id="ovTitle" class="ovTitle">ポイント</div>
-              <div id="ovMeta" class="ovMeta"></div>
+        <div class="editor">
+          <div class="editor-left">
+            <div class="label">選択中ピンのメモ</div>
+            <textarea id="memo" placeholder="例：ここで休憩、景色が良い、など"></textarea>
+          </div>
+          <div class="editor-right">
+            <div class="stats" id="stats"></div>
+            <div class="hint">
+              ・ピンは時系列順に線でつながります。<br/>
+              ・矢印が移動方向を示します。<br/>
+              ・自動記録は前面表示中のみ安定します（iPhoneのWeb制約）。
             </div>
-            <div id="ovMemo" class="ovMemo"></div>
-            <img id="ovImg" class="ovImg hidden" alt="写真" />
           </div>
-        </div>
-
-        <div class="watermark">
-          MapLibre + OpenFreeMap / Terrain: Terrarium DEM
         </div>
       </section>
+
+      <div id="toast" class="toast" aria-live="polite"></div>
     </main>
   </div>
 
