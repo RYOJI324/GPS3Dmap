@@ -4,35 +4,27 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Adventure Note</title>
-
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css">
   <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
-
-  <!-- EXIF reader (for DateTimeOriginal / GPS) -->
   <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
-
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="map"></div>
 
-  <!-- Top bar -->
   <div id="topBar">
     <label class="fileBtn">
       写真を読み込む
       <input id="photoInput" type="file" accept="image/*" multiple />
     </label>
-
     <button id="menuBtn" class="iconBtn" aria-label="メニュー">≡</button>
   </div>
 
-  <!-- Menu -->
   <div id="menuPanel" class="panel hidden" role="dialog" aria-label="メニュー">
     <div class="panelHeader">
       <div class="panelTitle">メニュー</div>
       <button id="menuCloseBtn" class="iconBtn" aria-label="閉じる">✕</button>
     </div>
-
     <div class="panelBody">
       <div class="row">
         <button id="exportJsonBtn" class="primary">JSON書き出し</button>
@@ -41,21 +33,17 @@
           <input id="importJsonInput" type="file" accept="application/json,.json" />
         </label>
       </div>
-
       <div class="divider"></div>
-
       <div class="row">
         <button id="clearBtn" class="danger">すべて消去（この端末）</button>
       </div>
-
       <p class="hint">
         ※位置情報の取得にはHTTPSが必要です（GitHub Pages等）。<br>
-        ※自動記録はiOSの仕様上、画面を消したりバックグラウンドにすると止まることがあります。
+        ※自動記録はiOSの仕様上、画面を消す/バックグラウンドにすると止まることがあります（前面動作前提）。
       </p>
     </div>
   </div>
 
-  <!-- Bottom controls -->
   <button id="recordBtn" class="fab">📍 現在地を記録</button>
 
   <div id="autoPanel">
@@ -67,7 +55,6 @@
     </select>
   </div>
 
-  <!-- Timeline -->
   <div id="timelineWrap">
     <div id="timelineHeader">
       <div class="title">タイムライン</div>

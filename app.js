@@ -1,16 +1,20 @@
-/* Adventure Note (flat map, pins, neon route, direction arrows, photo auto attach, JSON import/export, auto record)
-   - Map: MapLibre + OpenFreeMap
-   - iPhone Safari: must be served via HTTPS for geolocation
+/* Adventure Note（平面地図版）
+   - 📍ピンを時系列で追加し、軌跡（蛍光イエロー）と方向矢印（三角）を表示
+   - 写真を後から読み込み、EXIFの撮影時刻/位置情報でピンに自動配置・紐づけ
+   - JSONの書き出し/読み込み
+   - 自動記録（1/3/5分）※iOS Webは前面動作前提
 */
 
 const STORAGE_KEY = "adventure_note_v1";
 
+// 状態
 const state = {
   pins: [], // {id, lat, lng, timestamp, accuracyM, note, photos:[{id, filename, takenAt, gps?, thumbDataUrl}]}
   auto: { running: false, timerId: null, intervalSec: 180 },
   ui: { activePinId: null },
 };
 
+// DOM
 const el = {
   recordBtn: document.getElementById("recordBtn"),
   autoToggleBtn: document.getElementById("autoToggleBtn"),
@@ -27,14 +31,13 @@ const el = {
   clearBtn: document.getElementById("clearBtn"),
 };
 
-// ---------- Utilities ----------
+// ---------- 汎用 ----------
 function uuid() {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
     const r = (Math.random() * 16) | 0, v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
 }
-
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
 function fmtTime(ts) {
@@ -43,9 +46,7 @@ function fmtTime(ts) {
     const hh = String(d.getHours()).padStart(2, "0");
     const mm = String(d.getMinutes()).padStart(2, "0");
     return `${hh}:${mm}`;
-  } catch {
-    return "";
-  }
+  } catch { return ""; }
 }
 
 function showToast(msg, ms=1800) {
@@ -61,7 +62,6 @@ function saveLocal() {
     console.warn(e);
   }
 }
-
 function loadLocal() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -73,7 +73,7 @@ function loadLocal() {
   }
 }
 
-// Haversine distance (meters)
+// 距離（m）
 function distM(a, b) {
   const R = 6371000;
   const toRad = (x) => (x * Math.PI) / 180;
@@ -83,172 +83,6 @@ function distM(a, b) {
   const lat2 = toRad(b.lat);
   const s = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
   return 2 * R * Math.asin(Math.sqrt(s));
-}
-
-function findNearestPinByTime(takenAtMs) {
-  if (state.pins.length === 0) return null;
-  let best = null;
-  let bestDt = Infinity;
-  for (const p of state.pins) {
-    const dt = Math.abs(new Date(p.timestamp).getTime() - takenAtMs);
-    if (dt < bestDt) { bestDt = dt; best = p; }
-  }
-  return { pin: best, dtMs: bestDt };
-}
-
-function findNearestPinByTimeWithin(takenAtMs, withinMs) {
-  const r = findNearestPinByTime(takenAtMs);
-  if (!r) return null;
-  return r.dtMs <= withinMs ? r.pin : null;
-}
-
-// EXIF helpers
-function rationalToFloat(r) {
-  // exif-js may return number or {numerator, denominator}
-  if (typeof r === "number") return r;
-  if (!r) return NaN;
-  if (typeof r.numerator === "number" && typeof r.denominator === "number") {
-    return r.denominator ? (r.numerator / r.denominator) : NaN;
-  }
-  return NaN;
-}
-
-function dmsToDeg(dms, ref) {
-  if (!Array.isArray(dms) || dms.length < 3) return NaN;
-  const d = rationalToFloat(dms[0]);
-  const m = rationalToFloat(dms[1]);
-  const s = rationalToFloat(dms[2]);
-  let deg = d + (m/60) + (s/3600);
-  if (ref === "S" || ref === "W") deg *= -1;
-  return deg;
-}
-
-function parseExifDate(str) {
-  // "YYYY:MM:DD HH:MM:SS"
-  if (!str || typeof str !== "string") return null;
-  const m = str.match(/^(\d{4}):(\d{2}):(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
-  if (!m) return null;
-  const [_, y, mo, d, hh, mm, ss] = m;
-  // treat as local time
-  return new Date(Number(y), Number(mo)-1, Number(d), Number(hh), Number(mm), Number(ss)).getTime();
-}
-
-async function fileToDataURL(file, maxW=640, quality=0.82) {
-  // create a reasonably small thumbnail to embed in JSON (still can be large if many photos)
-  const url = URL.createObjectURL(file);
-  try {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
-
-    const scale = Math.min(1, maxW / img.width);
-    const w = Math.round(img.width * scale);
-    const h = Math.round(img.height * scale);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0, w, h);
-    return canvas.toDataURL("image/jpeg", quality);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-}
-
-// ---------- Map ----------
-const map = new maplibregl.Map({
-  container: "map",
-  style: "https://api.openfreemap.org/styles/liberty",
-  center: [137.2, 36.7], // Toyama-ish default
-  zoom: 12.5,
-  pitch: 0,
-  bearing: 0,
-  attributionControl: true
-});
-
-map.addControl(new maplibregl.NavigationControl({ showCompass: true, showZoom: true }), "top-right");
-
-const SOURCES = {
-  pins: "pins-src",
-  route: "route-src",
-  arrows: "arrows-src"
-};
-
-function pinsToGeoJSON() {
-  return {
-    type: "FeatureCollection",
-    features: state.pins.map((p, idx) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [p.lng, p.lat] },
-      properties: {
-        id: p.id,
-        idx: idx + 1,
-        label: "📍"
-      }
-    }))
-  };
-}
-
-function routeToGeoJSON() {
-  const coords = state.pins.map(p => [p.lng, p.lat]);
-  return {
-    type: "FeatureCollection",
-    features: coords.length >= 2 ? [{
-      type: "Feature",
-      geometry: { type: "LineString", coordinates: coords },
-      properties: {}
-    }] : []
-  };
-}
-
-function computeArrowPoints() {
-  // Place direction markers every N meters along the polyline.
-  const coords = state.pins.map(p => ({ lng: p.lng, lat: p.lat }));
-  const features = [];
-  if (coords.length < 2) return { type: "FeatureCollection", features };
-
-  // Build segment lengths
-  const segs = [];
-  let total = 0;
-  for (let i = 0; i < coords.length - 1; i++) {
-    const a = coords[i], b = coords[i+1];
-    const len = distM(a, b);
-    segs.push({ a, b, len });
-    total += len;
-  }
-
-  // Put arrows roughly every 400m, but at least 2 and at most 12
-  const desired = clamp(Math.round(total / 400), 2, 12);
-  const spacing = total / (desired + 1);
-
-  let target = spacing;
-  let acc = 0;
-  let segIndex = 0;
-
-  while (segIndex < segs.length && target < total) {
-    const seg = segs[segIndex];
-    if (acc + seg.len >= target) {
-      const t = (target - acc) / seg.len; // 0..1
-      const lng = seg.a.lng + (seg.b.lng - seg.a.lng) * t;
-      const lat = seg.a.lat + (seg.b.lat - seg.a.lat) * t;
-
-      // bearing in degrees
-      const bearing = calcBearing(seg.a.lat, seg.a.lng, seg.b.lat, seg.b.lng);
-
-      features.push({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [lng, lat] },
-        properties: { bearing }
-      });
-
-      target += spacing;
-    } else {
-      acc += seg.len;
-      segIndex++;
-    }
-  }
-
-  return { type: "FeatureCollection", features };
 }
 
 function calcBearing(lat1, lng1, lat2, lng2) {
@@ -263,6 +97,150 @@ function calcBearing(lat1, lng1, lat2, lng2) {
   return θ;
 }
 
+function findNearestPinByTime(takenAtMs) {
+  if (state.pins.length === 0) return null;
+  let best = null;
+  let bestDt = Infinity;
+  for (const p of state.pins) {
+    const dt = Math.abs(new Date(p.timestamp).getTime() - takenAtMs);
+    if (dt < bestDt) { bestDt = dt; best = p; }
+  }
+  return { pin: best, dtMs: bestDt };
+}
+function findNearestPinByTimeWithin(takenAtMs, withinMs) {
+  const r = findNearestPinByTime(takenAtMs);
+  if (!r) return null;
+  return r.dtMs <= withinMs ? r.pin : null;
+}
+
+// ---------- EXIF補助 ----------
+function rationalToFloat(r) {
+  if (typeof r === "number") return r;
+  if (!r) return NaN;
+  if (typeof r.numerator === "number" && typeof r.denominator === "number") {
+    return r.denominator ? (r.numerator / r.denominator) : NaN;
+  }
+  return NaN;
+}
+function dmsToDeg(dms, ref) {
+  if (!Array.isArray(dms) || dms.length < 3) return NaN;
+  const d = rationalToFloat(dms[0]);
+  const m = rationalToFloat(dms[1]);
+  const s = rationalToFloat(dms[2]);
+  let deg = d + (m/60) + (s/3600);
+  if (ref === "S" || ref === "W") deg *= -1;
+  return deg;
+}
+function parseExifDate(str) {
+  // "YYYY:MM:DD HH:MM:SS"
+  if (!str || typeof str !== "string") return null;
+  const m = str.match(/^(\d{4}):(\d{2}):(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const [_, y, mo, d, hh, mm, ss] = m;
+  return new Date(Number(y), Number(mo)-1, Number(d), Number(hh), Number(mm), Number(ss)).getTime();
+}
+
+async function fileToDataURL(file, maxW=720, quality=0.82) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+    const scale = Math.min(1, maxW / img.width);
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", quality);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// ---------- 地図 ----------
+/* 重要：
+   OpenFreeMapのstyleは `https://tiles.openfreemap.org/styles/liberty` が動作します。
+*/
+const map = new maplibregl.Map({
+  container: "map",
+  style: "https://tiles.openfreemap.org/styles/liberty",
+  center: [137.2, 36.7], // 富山付近の初期値（任意）
+  zoom: 12.5,
+  pitch: 0,
+  bearing: 0,
+  attributionControl: true
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: true, showZoom: true }), "top-right");
+
+const SOURCES = { pins: "pins-src", route: "route-src", arrows: "arrows-src" };
+
+function pinsToGeoJSON() {
+  return {
+    type: "FeatureCollection",
+    features: state.pins.map((p, idx) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+      properties: { id: p.id, idx: idx + 1, label: "📍" }
+    }))
+  };
+}
+function routeToGeoJSON() {
+  const coords = state.pins.map(p => [p.lng, p.lat]);
+  return {
+    type: "FeatureCollection",
+    features: coords.length >= 2 ? [{
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: coords },
+      properties: {}
+    }] : []
+  };
+}
+function computeArrowPoints() {
+  const coords = state.pins.map(p => ({ lng: p.lng, lat: p.lat }));
+  const features = [];
+  if (coords.length < 2) return { type: "FeatureCollection", features };
+
+  const segs = [];
+  let total = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const a = coords[i], b = coords[i+1];
+    const len = distM(a, b);
+    segs.push({ a, b, len });
+    total += len;
+  }
+
+  // 全長に応じて矢印数を決める（最低2、最大12）
+  const desired = clamp(Math.round(total / 400), 2, 12);
+  const spacing = total / (desired + 1);
+
+  let target = spacing;
+  let acc = 0;
+  let segIndex = 0;
+
+  while (segIndex < segs.length && target < total) {
+    const seg = segs[segIndex];
+    if (acc + seg.len >= target) {
+      const t = (target - acc) / seg.len;
+      const lng = seg.a.lng + (seg.b.lng - seg.a.lng) * t;
+      const lat = seg.a.lat + (seg.b.lat - seg.a.lat) * t;
+      const bearing = calcBearing(seg.a.lat, seg.a.lng, seg.b.lat, seg.b.lng);
+      features.push({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [lng, lat] },
+        properties: { bearing }
+      });
+      target += spacing;
+    } else {
+      acc += seg.len;
+      segIndex++;
+    }
+  }
+  return { type: "FeatureCollection", features };
+}
+
 function ensureTriangleIcon() {
   const size = 48;
   const canvas = document.createElement("canvas");
@@ -270,21 +248,57 @@ function ensureTriangleIcon() {
   canvas.height = size;
   const ctx = canvas.getContext("2d");
 
-  // draw a filled triangle pointing up; rotation done by icon-rotate
+  // 上向きの三角（回転は icon-rotate で）
   ctx.clearRect(0,0,size,size);
   ctx.beginPath();
   ctx.moveTo(size/2, 6);
   ctx.lineTo(size-10, size-10);
   ctx.lineTo(10, size-10);
   ctx.closePath();
-  ctx.fillStyle = "rgba(255,255,0,0.95)"; // neon yellow
+  ctx.fillStyle = "rgba(255,255,0,0.95)";
   ctx.shadowColor = "rgba(255,255,0,0.9)";
   ctx.shadowBlur = 10;
   ctx.fill();
 
   const imgData = ctx.getImageData(0, 0, size, size);
+  if (!map.hasImage("dir-tri")) {
+    map.addImage("dir-tri", { width: size, height: size, data: imgData.data });
+  }
+}
 
-  map.addImage("dir-tri", { width: size, height: size, data: imgData.data });
+let photoMarkers = [];
+function clearPhotoMarkers() {
+  for (const m of photoMarkers) m.remove();
+  photoMarkers = [];
+}
+function renderPhotoMarkers() {
+  clearPhotoMarkers();
+  for (const pin of state.pins) {
+    if (!pin.photos || pin.photos.length === 0) continue;
+    const first = pin.photos[0];
+    if (!first.thumbDataUrl) continue;
+
+    const wrap = document.createElement("div");
+    wrap.style.width = "42px";
+    wrap.style.height = "42px";
+    wrap.style.borderRadius = "12px";
+    wrap.style.overflow = "hidden";
+    wrap.style.border = "2px solid rgba(255,255,255,0.9)";
+    wrap.style.boxShadow = "0 8px 18px rgba(0,0,0,0.35)";
+
+    const img = document.createElement("img");
+    img.src = first.thumbDataUrl;
+    img.style.width = "100%";
+    img.style.height = "100%";
+    img.style.objectFit = "cover";
+    wrap.appendChild(img);
+
+    const m = new maplibregl.Marker({ element: wrap, anchor: "bottom" })
+      .setLngLat([pin.lng, pin.lat])
+      .addTo(map);
+
+    photoMarkers.push(m);
+  }
 }
 
 function refreshMapData() {
@@ -302,46 +316,8 @@ function refreshMapData() {
   if (routeSrc) routeSrc.setData(routeG);
   if (arrowsSrc) arrowsSrc.setData(arrowsG);
 
-  // Also update photo markers (HTML markers) each time
   renderPhotoMarkers();
-
-  // Update meta
   el.timelineMeta.textContent = `${state.pins.length}件`;
-}
-
-let photoMarkers = []; // maplibre Marker instances for thumbnails
-function clearPhotoMarkers() {
-  for (const m of photoMarkers) m.remove();
-  photoMarkers = [];
-}
-
-function renderPhotoMarkers() {
-  clearPhotoMarkers();
-  for (const pin of state.pins) {
-    if (!pin.photos || pin.photos.length === 0) continue;
-    const first = pin.photos[0];
-    if (!first.thumbDataUrl) continue;
-
-    const wrap = document.createElement("div");
-    wrap.style.width = "42px";
-    wrap.style.height = "42px";
-    wrap.style.borderRadius = "12px";
-    wrap.style.overflow = "hidden";
-    wrap.style.border = "2px solid rgba(255,255,255,0.9)";
-    wrap.style.boxShadow = "0 8px 18px rgba(0,0,0,0.35)";
-    const img = document.createElement("img");
-    img.src = first.thumbDataUrl;
-    img.style.width = "100%";
-    img.style.height = "100%";
-    img.style.objectFit = "cover";
-    wrap.appendChild(img);
-
-    const m = new maplibregl.Marker({ element: wrap, anchor: "bottom" })
-      .setLngLat([pin.lng, pin.lat])
-      .addTo(map);
-
-    photoMarkers.push(m);
-  }
 }
 
 function fitToPins() {
@@ -351,7 +327,7 @@ function fitToPins() {
   map.fitBounds(bounds, { padding: 70, duration: 600 });
 }
 
-// ---------- Timeline ----------
+// ---------- タイムライン ----------
 function renderTimeline() {
   el.timeline.innerHTML = "";
   const frag = document.createDocumentFragment();
@@ -359,9 +335,11 @@ function renderTimeline() {
   state.pins.forEach((p, idx) => {
     const card = document.createElement("div");
     card.className = "card" + (p.id === state.ui.activePinId ? " active" : "");
+
     const t = document.createElement("div");
     t.className = "t";
     t.textContent = `${idx+1}. ${fmtTime(p.timestamp)}`;
+
     const s = document.createElement("div");
     s.className = "s";
     const photoCount = (p.photos?.length || 0);
@@ -389,25 +367,15 @@ function renderTimeline() {
 
   el.timeline.appendChild(frag);
 
-  // auto-scroll to the latest pin (helps "今どこ" in auto-record)
+  // “今どこ”：最新へ自動スクロール
   if (state.pins.length > 0) {
-    requestAnimationFrame(() => {
-      el.timeline.scrollLeft = el.timeline.scrollWidth;
-    });
+    requestAnimationFrame(() => { el.timeline.scrollLeft = el.timeline.scrollWidth; });
   }
 }
 
-// ---------- Add pin / actions ----------
+// ---------- ピン追加/位置取得 ----------
 async function addPin({ lat, lng, timestamp = new Date().toISOString(), accuracyM = null }) {
-  const pin = {
-    id: uuid(),
-    lat,
-    lng,
-    timestamp,
-    accuracyM,
-    note: "",
-    photos: []
-  };
+  const pin = { id: uuid(), lat, lng, timestamp, accuracyM, note: "", photos: [] };
   state.pins.push(pin);
   state.ui.activePinId = pin.id;
 
@@ -415,21 +383,18 @@ async function addPin({ lat, lng, timestamp = new Date().toISOString(), accuracy
   renderTimeline();
   saveLocal();
 
-  // keep map on track
-  if (state.pins.length === 1) {
-    map.easeTo({ center: [lng, lat], zoom: 15, duration: 450 });
-  }
+  if (state.pins.length === 1) map.easeTo({ center: [lng, lat], zoom: 15, duration: 450 });
 }
 
 function geolocateOnce() {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
-      reject(new Error("この端末では位置情報を利用できません。"));
+      reject(new Error("位置情報が利用できません。"));
       return;
     }
     navigator.geolocation.getCurrentPosition(
-      (pos) => resolve(pos),
-      (err) => reject(err),
+      pos => resolve(pos),
+      err => reject(err),
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
   });
@@ -449,21 +414,25 @@ el.recordBtn.addEventListener("click", async () => {
     }
   } catch (e) {
     console.warn(e);
-    showToast("位置情報を取得できませんでした（HTTPSで開いているか/許可設定を確認）", 2600);
+    showToast("位置情報を取得できませんでした（HTTPS/許可設定を確認）", 2600);
   }
 });
 
+// ---------- 自動記録 ----------
 el.autoIntervalSel.addEventListener("change", () => {
   state.auto.intervalSec = Number(el.autoIntervalSel.value || "180");
   if (state.auto.running) {
     stopAuto();
     startAuto();
+  } else {
+    el.autoToggleBtn.textContent = `▶ 自動記録（${state.auto.intervalSec/60}分）`;
   }
 });
 
 function startAuto() {
   const intervalMs = state.auto.intervalSec * 1000;
   state.auto.running = true;
+
   el.autoToggleBtn.textContent = "■ 自動記録停止";
   el.autoToggleBtn.classList.remove("secondary");
   el.autoToggleBtn.classList.add("primary");
@@ -486,9 +455,11 @@ function stopAuto() {
   if (state.auto.timerId) clearInterval(state.auto.timerId);
   state.auto.timerId = null;
   state.auto.running = false;
+
   el.autoToggleBtn.textContent = `▶ 自動記録（${state.auto.intervalSec/60}分）`;
   el.autoToggleBtn.classList.add("secondary");
   el.autoToggleBtn.classList.remove("primary");
+
   showToast("自動記録を停止しました");
 }
 
@@ -497,7 +468,7 @@ el.autoToggleBtn.addEventListener("click", () => {
   else startAuto();
 });
 
-// ---------- Photos ----------
+// ---------- 写真取り込み（自動配置） ----------
 async function attachPhotoToPin(pin, photo) {
   pin.photos = pin.photos || [];
   pin.photos.push(photo);
@@ -505,22 +476,17 @@ async function attachPhotoToPin(pin, photo) {
 
 async function handlePhotoFiles(files) {
   if (!files || files.length === 0) return;
-
   showToast("写真を解析中…");
 
   for (const file of files) {
     const photoId = uuid();
     const filename = file.name || "photo.jpg";
 
-    // Build thumbnail
+    // サムネ作成
     let thumbDataUrl = null;
-    try {
-      thumbDataUrl = await fileToDataURL(file, 720, 0.82);
-    } catch (e) {
-      console.warn("thumb error", e);
-    }
+    try { thumbDataUrl = await fileToDataURL(file, 720, 0.82); } catch (e) { console.warn("thumb error", e); }
 
-    // Extract EXIF (date + gps)
+    // EXIF抽出
     const exif = await new Promise((resolve) => {
       EXIF.getData(file, function () {
         const dtStr = EXIF.getTag(this, "DateTimeOriginal") || EXIF.getTag(this, "DateTime") || null;
@@ -549,39 +515,33 @@ async function handlePhotoFiles(files) {
       thumbDataUrl
     };
 
-    // Auto attach rules:
-    // - If GPS exists:
-    //    - If time exists: try attach to nearest pin within 10min.
-    //      - if found -> attach to that pin
-    //      - else -> create new pin at GPS (timestamp = takenAt or now) and attach
-    //    - If time not exists: create new pin at GPS (timestamp=now) and attach
-    // - If GPS missing but time exists:
-    //    - attach to nearest pin by time (if any), otherwise keep unassigned (currently: create no pin)
+    // 自動配置ルール
+    const withinMs = 10 * 60 * 1000;
+
     if (photo.gps) {
-      const tms = exif.takenAtMs;
-      const withinMs = 10 * 60 * 1000;
       let targetPin = null;
 
-      if (tms != null) targetPin = findNearestPinByTimeWithin(tms, withinMs);
+      if (exif.takenAtMs != null) {
+        targetPin = findNearestPinByTimeWithin(exif.takenAtMs, withinMs);
+      }
 
       if (!targetPin) {
-        // create new pin from photo GPS
-        const ts = (tms != null) ? new Date(tms).toISOString() : new Date().toISOString();
+        const ts = (exif.takenAtMs != null) ? new Date(exif.takenAtMs).toISOString() : new Date().toISOString();
         await addPin({ lat: photo.gps.lat, lng: photo.gps.lng, timestamp: ts, accuracyM: null });
         targetPin = state.pins[state.pins.length - 1];
       }
 
       await attachPhotoToPin(targetPin, photo);
+
     } else if (exif.takenAtMs != null) {
       const nearest = findNearestPinByTime(exif.takenAtMs);
       if (nearest && nearest.pin) {
         await attachPhotoToPin(nearest.pin, photo);
       } else {
-        // No pins exist: keep as "unassigned" (future)
-        console.warn("No pins to attach this photo; skipping attach:", filename);
+        console.warn("ピンがないため写真を紐づけできません:", filename);
       }
     } else {
-      console.warn("Photo has no EXIF time/GPS; skipping attach:", filename);
+      console.warn("EXIFの時刻/GPSが無いため自動配置できません:", filename);
     }
   }
 
@@ -593,12 +553,11 @@ async function handlePhotoFiles(files) {
 
 el.photoInput.addEventListener("change", async (e) => {
   const files = Array.from(e.target.files || []);
-  // reset input so selecting same files again triggers change
-  el.photoInput.value = "";
+  el.photoInput.value = ""; // 同じ写真を再選択できるように
   await handlePhotoFiles(files);
 });
 
-// ---------- JSON import/export ----------
+// ---------- JSON入出力 ----------
 function downloadBlob(filename, contentType, dataStr) {
   const blob = new Blob([dataStr], { type: contentType });
   const url = URL.createObjectURL(blob);
@@ -612,11 +571,7 @@ function downloadBlob(filename, contentType, dataStr) {
 }
 
 el.exportJsonBtn.addEventListener("click", () => {
-  const payload = {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    pins: state.pins
-  };
+  const payload = { version: 1, exportedAt: new Date().toISOString(), pins: state.pins };
   const name = `adventure_note_${new Date().toISOString().slice(0,10)}.json`;
   downloadBlob(name, "application/json", JSON.stringify(payload, null, 2));
   showToast("JSONを書き出しました");
@@ -631,6 +586,7 @@ el.importJsonInput.addEventListener("change", async (e) => {
     const txt = await file.text();
     const obj = JSON.parse(txt);
     if (!obj || !Array.isArray(obj.pins)) throw new Error("invalid");
+
     state.pins = obj.pins;
     state.ui.activePinId = state.pins.length ? state.pins[state.pins.length - 1].id : null;
 
@@ -645,17 +601,14 @@ el.importJsonInput.addEventListener("change", async (e) => {
   }
 });
 
-// ---------- Menu ----------
+// ---------- メニュー ----------
 function openMenu() { el.menuPanel.classList.remove("hidden"); }
 function closeMenu() { el.menuPanel.classList.add("hidden"); }
-el.menuBtn.addEventListener("click", () => openMenu());
-el.menuCloseBtn.addEventListener("click", () => closeMenu());
-el.menuPanel.addEventListener("click", (ev) => {
-  // click outside body to close
-  if (ev.target === el.menuPanel) closeMenu();
-});
+el.menuBtn.addEventListener("click", openMenu);
+el.menuCloseBtn.addEventListener("click", closeMenu);
+el.menuPanel.addEventListener("click", (ev) => { if (ev.target === el.menuPanel) closeMenu(); });
 
-// Clear
+// 消去
 el.clearBtn.addEventListener("click", () => {
   if (!confirm("この端末内のデータをすべて消去します。よろしいですか？")) return;
   state.pins = [];
@@ -666,16 +619,27 @@ el.clearBtn.addEventListener("click", () => {
   showToast("消去しました");
 });
 
-// ---------- Initialize ----------
+// ---------- 初期化 ----------
 loadLocal();
 
 map.on("load", () => {
-  // Sources
   map.addSource(SOURCES.pins, { type: "geojson", data: pinsToGeoJSON() });
   map.addSource(SOURCES.route, { type: "geojson", data: routeToGeoJSON() });
   map.addSource(SOURCES.arrows, { type: "geojson", data: computeArrowPoints() });
 
-  // Route line (neon yellow)
+  // 軌跡：蛍光イエロー（グロー下敷き → 本線）
+  map.addLayer({
+    id: "route-glow",
+    type: "line",
+    source: SOURCES.route,
+    layout: { "line-join": "round", "line-cap": "round" },
+    paint: {
+      "line-color": "rgba(255,255,0,0.35)",
+      "line-width": 14,
+      "line-blur": 6
+    }
+  });
+
   map.addLayer({
     id: "route-line",
     type: "line",
@@ -688,20 +652,7 @@ map.on("load", () => {
     }
   });
 
-  // Glow-ish underlay
-  map.addLayer({
-    id: "route-glow",
-    type: "line",
-    source: SOURCES.route,
-    layout: { "line-join": "round", "line-cap": "round" },
-    paint: {
-      "line-color": "rgba(255,255,0,0.35)",
-      "line-width": 14,
-      "line-blur": 6
-    }
-  }, "route-line");
-
-  // Pins as emoji text
+  // ピン：📍
   map.addLayer({
     id: "pins",
     type: "symbol",
@@ -716,7 +667,7 @@ map.on("load", () => {
     }
   });
 
-  // Direction arrows
+  // 方向矢印（三角）
   ensureTriangleIcon();
   map.addLayer({
     id: "arrows",
@@ -733,14 +684,7 @@ map.on("load", () => {
     }
   });
 
-  // initial render
   refreshMapData();
   renderTimeline();
   if (state.pins.length) fitToPins();
-});
-
-// Keep map data in sync if style reloads
-map.on("styledata", () => {
-  // if sources missing (rare), reload page is simplest; but we can attempt refresh safely
-  try { refreshMapData(); } catch {}
 });
