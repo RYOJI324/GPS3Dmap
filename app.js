@@ -1,580 +1,779 @@
+// アドベンチャーノート（ピン＋3Dフライオーバー）
+// v3: 日本語UI + Journal風デザイン + 写真の撮影時刻で自動割り当て + Flyover中オーバーレイ + JSON入出力 + 端末保存(IndexedDB)
 
-/* Pin Flyover (MVP)
-   - Map: MapLibre GL JS + OpenFreeMap style (free public instance)
-   - Terrain DEM: Mapzen/Tilezen Terrain Tiles on AWS (terrarium PNG)
-   - Pins: Tap PIN -> single-shot geolocation -> add point -> connect line
-   - Flyover: camera follows the line (close / adventurous), duration AUTO (30–90s) or manual
-*/
+const $ = (sel) => document.querySelector(sel);
 
-const $ = (q) => document.querySelector(q);
-
-const STORAGE_KEY = "pinFlyover:v1";
-const DEFAULT_CENTER = [137.214, 36.695]; // Toyama-ish
-const DEFAULT_ZOOM = 11.5;
-
-const UI = {
-  btnPin: $("#btnPin"),
-  btnPlay: $("#btnPlay"),
-  btnStop: $("#btnStop"),
-  btnClear: $("#btnClear"),
-  btnLocate: $("#btnLocate"),
-  pinList: $("#pinList"),
-  pinCount: $("#pinCount"),
-  gpsHint: $("#gpsHint"),
-  durationMode: $("#durationMode"),
-  autoHint: $("#autoHint"),
-  btnExport: $("#btnExport"),
-  fileImport: $("#fileImport"),
-  toast: $("#toast"),
+const state = {
+  map: null,
+  pins: [], // {id, lat,lng, ts, acc, memo, photos:[{id, ts, name, dataUrl}]}
+  activePinId: null,
+  fly: { running:false, raf: null, start:0, duration:0, points:[], meta:[], nextOverlayAt:0, shown:new Set() },
+  sourcesReady: false,
 };
 
-let state = {
-  pins: [],
-  lastFix: null,
-  playing: false,
-  playRaf: null,
-  playStartMs: 0,
-  playDurationMs: 0,
-  path: [], // densified
-};
+const DB_KEY_LIST = "ajn:saved:list";
+const DB_KEY_PREFIX = "ajn:saved:item:";
 
-function toast(msg, ms=2200){
-  UI.toast.textContent = msg;
-  UI.toast.hidden = false;
-  clearTimeout(UI.toast._t);
-  UI.toast._t = setTimeout(() => UI.toast.hidden = true, ms);
-}
-
-function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
-
-// Haversine distance (meters)
-function distM(a, b){
-  const R = 6371000;
-  const toRad = (d) => d * Math.PI / 180;
-  const [lon1, lat1] = a;
-  const [lon2, lat2] = b;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const s1 = Math.sin(dLat/2);
-  const s2 = Math.sin(dLon/2);
-  const x = s1*s1 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*s2*s2;
-  return 2 * R * Math.asin(Math.sqrt(x));
-}
-
-function bearingDeg(a, b){
-  const toRad = (d)=> d*Math.PI/180;
-  const toDeg = (r)=> r*180/Math.PI;
-  const [lon1, lat1] = a.map(toRad);
-  const [lon2, lat2] = b.map(toRad);
-  const dLon = lon2 - lon1;
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
-  let brng = toDeg(Math.atan2(y, x));
-  brng = (brng + 360) % 360;
-  return brng;
-}
-
-function formatMeters(m){
-  if (m < 1000) return `${Math.round(m)}m`;
-  return `${(m/1000).toFixed(2)}km`;
-}
-
-function nowIso(){
+function nowISO(){
   return new Date().toISOString();
 }
-
-function save(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ pins: state.pins }));
+function fmtTime(ts){
+  const d = new Date(ts);
+  const pad=(n)=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-function load(){
-  try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return;
-    const obj = JSON.parse(raw);
-    if (Array.isArray(obj?.pins)) state.pins = obj.pins;
-  }catch(e){
-    console.warn(e);
-  }
+function haversineKm(a,b){
+  const R=6371;
+  const toRad=(x)=>x*Math.PI/180;
+  const dLat=toRad(b.lat-a.lat);
+  const dLng=toRad(b.lng-a.lng);
+  const lat1=toRad(a.lat), lat2=toRad(b.lat);
+  const s = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.min(1, Math.sqrt(s)));
+}
+function clamp(x, a, b){ return Math.max(a, Math.min(b, x)); }
+
+function toast(msg, ms=2200){
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(()=>t.classList.add("hidden"), ms);
 }
 
-function exportJson(){
-  const blob = new Blob([JSON.stringify({ pins: state.pins }, null, 2)], {type:"application/json"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `pin-flyover-${new Date().toISOString().slice(0,10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+function genId(){
+  return Math.random().toString(36).slice(2,10) + "-" + Date.now().toString(36);
 }
 
-function importJson(file){
-  const fr = new FileReader();
-  fr.onload = () => {
+// ---- Map init (MapLibre + OpenFreeMap + Terrain) ----
+async function initMap(){
+  const styleUrl = "https://tiles.openfreemap.org/styles/liberty"; // OpenFreeMap quick start
+  const map = new maplibregl.Map({
+    container: "map",
+    style: styleUrl,
+    center: [137.0, 36.6],
+    zoom: 10,
+    pitch: 65,
+    bearing: -20,
+    antialias: true
+  });
+  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+
+  map.on("load", () => {
+    // Terrain source: Terrarium DEM tiles (public) - good for prototypes.
+    // Note: For heavy use, consider hosting your own tiles.
     try{
-      const obj = JSON.parse(fr.result);
-      if(!Array.isArray(obj?.pins)) throw new Error("pins not found");
-      state.pins = obj.pins.filter(p => p && Array.isArray(p.lngLat) && p.lngLat.length===2);
-      save();
-      renderAll();
-      toast("Imported!");
+      map.addSource("terrain-dem", {
+        type: "raster-dem",
+        tiles: [
+          "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+        ],
+        tileSize: 256,
+        maxzoom: 14
+      });
+      map.setTerrain({ source: "terrain-dem", exaggeration: 1.4 });
     }catch(e){
-      console.warn(e);
-      toast("Import failed: invalid JSON");
+      console.warn("terrain setup failed", e);
     }
-  };
-  fr.readAsText(file);
-}
 
-/* ---------- Map ---------- */
-const map = new maplibregl.Map({
-  container: "map",
-  style: "https://tiles.openfreemap.org/styles/3d", // free public style
-  center: DEFAULT_CENTER,
-  zoom: DEFAULT_ZOOM,
-  pitch: 65,
-  bearing: 20,
-  attributionControl: true,
-});
-
-map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
-
-map.on("load", () => {
-  // Add free DEM tiles (Terrarium) from Tilezen terrain tiles on AWS.
-  // Docs/registry: https://registry.opendata.aws/terrain-tiles/
-  // Tile URL commonly used: https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
-  try{
-    map.addSource("dem-terrain", {
-      type: "raster-dem",
-      tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
-      tileSize: 256,
-      encoding: "terrarium",
-      attribution: "Terrain: Mapzen/Tilzen (AWS terrain tiles)",
-      maxzoom: 15
+    // Line source/layer
+    map.addSource("route", {
+      type: "geojson",
+      data: { type:"FeatureCollection", features: [] }
+    });
+    map.addLayer({
+      id: "route-line",
+      type: "line",
+      source: "route",
+      paint: {
+        "line-width": 5,
+        "line-opacity": 0.85,
+        "line-color": "#ffcc66"
+      }
     });
 
-    map.setTerrain({ source: "dem-terrain", exaggeration: 1.4 });
-
-    // optional hillshade (helps depth)
+    // Pins source/layer
+    map.addSource("pins", {
+      type: "geojson",
+      data: { type:"FeatureCollection", features: [] }
+    });
     map.addLayer({
-      id: "hillshade",
-      type: "hillshade",
-      source: "dem-terrain",
+      id: "pins-circle",
+      type: "circle",
+      source: "pins",
       paint: {
-        "hillshade-exaggeration": 0.3,
+        "circle-radius": 8,
+        "circle-color": "#7fe7c4",
+        "circle-stroke-width": 2,
+        "circle-stroke-color": "rgba(255,255,255,0.8)"
       }
-    }, findFirstSymbolLayerId());
-  }catch(e){
-    console.warn("Terrain unavailable:", e);
-  }
+    });
 
-  // Sources/layers for pins and line
-  map.addSource("pins", { type: "geojson", data: pinsToGeoJSON() });
-  map.addLayer({
-    id: "pin-circles",
-    type: "circle",
-    source: "pins",
-    paint: {
-      "circle-radius": 7,
-      "circle-stroke-width": 2,
-      "circle-opacity": 0.95,
-      "circle-stroke-opacity": 0.95,
-    }
+    map.on("click", "pins-circle", (e) => {
+      const f = e.features?.[0];
+      if(!f) return;
+      const id = f.properties.id;
+      setActivePin(id, true);
+    });
+
+    // Long-press delete (mobile)
+    let pressTimer=null;
+    map.on("touchstart", "pins-circle", (e) => {
+      if(pressTimer) clearTimeout(pressTimer);
+      const f = e.features?.[0];
+      if(!f) return;
+      const id = f.properties.id;
+      pressTimer = setTimeout(()=>{
+        if(confirm("このピンを削除しますか？")){
+          deletePin(id);
+        }
+      }, 650);
+    });
+    map.on("touchend", "pins-circle", ()=>{ if(pressTimer) clearTimeout(pressTimer); });
+
+    state.map = map;
+    state.sourcesReady = true;
+    renderAll();
+    toast("準備OK。まず「現在地を記録」を押してみてください。", 2600);
   });
-
-  map.addLayer({
-    id: "pin-labels",
-    type: "symbol",
-    source: "pins",
-    layout: {
-      "text-field": ["get","label"],
-      "text-size": 12,
-      "text-offset": [0, 1.1],
-      "text-anchor": "top",
-      "text-optional": true
-    },
-    paint: {
-      "text-halo-width": 1.2,
-      "text-halo-blur": 0.6
-    }
-  });
-
-  map.addSource("route", { type: "geojson", data: routeToGeoJSON() });
-  map.addLayer({
-    id: "route-line",
-    type: "line",
-    source: "route",
-    layout: {
-      "line-join": "round",
-      "line-cap": "round"
-    },
-    paint: {
-      "line-width": 4,
-      "line-opacity": 0.90
-    }
-  });
-
-  map.on("click", "pin-circles", (e) => {
-    const f = e.features?.[0];
-    if(!f) return;
-    const id = f.properties?.id;
-    const p = state.pins.find(x => x.id === id);
-    if(p){
-      map.easeTo({ center: p.lngLat, zoom: Math.max(map.getZoom(), 15), duration: 450 });
-      toast(p.name || "Pin");
-    }
-  });
-
-  renderAll();
-});
-
-function findFirstSymbolLayerId(){
-  const layers = map.getStyle()?.layers || [];
-  for (const l of layers){
-    if (l.type === "symbol") return l.id;
-  }
-  return undefined;
 }
 
+// ---- Rendering ----
 function pinsToGeoJSON(){
-  return {
-    type:"FeatureCollection",
-    features: state.pins.map((p, idx) => ({
-      type:"Feature",
-      geometry:{ type:"Point", coordinates: p.lngLat },
-      properties:{
-        id: p.id,
-        label: String(idx+1),
-        name: p.name || `Pin ${idx+1}`
-      }
-    }))
-  };
+  const feats = state.pins.map((p, idx)=>({
+    type:"Feature",
+    geometry:{ type:"Point", coordinates:[p.lng, p.lat] },
+    properties:{ id:p.id, idx: idx+1 }
+  }));
+  return { type:"FeatureCollection", features: feats };
 }
-
 function routeToGeoJSON(){
-  if(state.pins.length < 2){
-    return { type:"FeatureCollection", features:[] };
-  }
+  if(state.pins.length < 2) return { type:"FeatureCollection", features: [] };
+  const coords = state.pins.map(p=>[p.lng, p.lat]);
   return {
     type:"FeatureCollection",
-    features:[{
+    features: [{
       type:"Feature",
-      geometry:{ type:"LineString", coordinates: state.pins.map(p => p.lngLat) },
+      geometry:{ type:"LineString", coordinates: coords },
       properties:{}
     }]
   };
 }
 
-function updateMapData(){
-  if(!map?.isStyleLoaded?.()) return;
-  const sPins = map.getSource("pins");
-  const sRoute = map.getSource("route");
-  if (sPins) sPins.setData(pinsToGeoJSON());
-  if (sRoute) sRoute.setData(routeToGeoJSON());
+function updateMapSources(){
+  if(!state.map || !state.sourcesReady) return;
+  const map = state.map;
+  const pinsSrc = map.getSource("pins");
+  const routeSrc = map.getSource("route");
+  if(pinsSrc) pinsSrc.setData(pinsToGeoJSON());
+  if(routeSrc) routeSrc.setData(routeToGeoJSON());
 }
 
-/* ---------- UI rendering ---------- */
-function renderList(){
-  UI.pinCount.textContent = String(state.pins.length);
-  UI.pinList.innerHTML = "";
+function renderTimeline(){
+  const el = $("#timeline");
+  el.innerHTML = "";
   if(state.pins.length === 0){
-    const div = document.createElement("div");
-    div.className = "item";
-    div.innerHTML = `<div class="meta"><div class="name">No pins yet</div><div class="small">Tap PIN to add your first point.</div></div>`;
-    UI.pinList.appendChild(div);
+    const empty = document.createElement("div");
+    empty.className="smallhelp";
+    empty.textContent = "まだピンがありません。旅先で「現在地を記録」を押してください。";
+    el.appendChild(empty);
     return;
   }
 
-  for (let i=0; i<state.pins.length; i++){
-    const p = state.pins[i];
-    const row = document.createElement("div");
-    row.className = "item";
+  state.pins.forEach((p, idx)=>{
+    const div = document.createElement("div");
+    div.className = "titem" + (p.id===state.activePinId ? " active" : "");
+    div.dataset.id = p.id;
+    const badge = document.createElement("div");
+    badge.className="badge";
+    badge.textContent = String(idx+1);
 
-    const name = escapeHtml(p.name || `Pin ${i+1}`);
-    const note = escapeHtml(p.note || "");
-    const acc = (typeof p.accuracyM === "number") ? `±${Math.round(p.accuracyM)}m` : "--";
-    const t = p.time ? new Date(p.time).toLocaleString() : "--";
-    const coords = `${p.lngLat[1].toFixed(5)}, ${p.lngLat[0].toFixed(5)}`;
+    const meta = document.createElement("div");
+    meta.className="tmeta";
+    const name = document.createElement("div");
+    name.className="tname";
+    const photoCount = p.photos?.length || 0;
+    const memoPreview = (p.memo||"").trim().slice(0, 28);
+    name.textContent = memoPreview ? memoPreview : `ポイント ${idx+1}`;
 
-    row.innerHTML = `
-      <div class="meta">
-        <div class="name">${i+1}. ${name}</div>
-        <div class="small">${coords} • ${acc} • ${t}</div>
-        ${note ? `<div class="small">${note}</div>` : ``}
-      </div>
-      <div class="actions">
-        <button class="iconBtn" data-act="up" ${i===0?"disabled":""} title="up">↑</button>
-        <button class="iconBtn" data-act="down" ${i===state.pins.length-1?"disabled":""} title="down">↓</button>
-        <button class="iconBtn" data-act="edit" title="edit">✎</button>
-        <button class="iconBtn" data-act="del" title="delete">🗑</button>
-      </div>
-    `;
-    row.querySelectorAll("button").forEach(btn=>{
-      btn.addEventListener("click",(ev)=>{
-        const act = btn.dataset.act;
-        if(act==="up") swap(i, i-1);
-        if(act==="down") swap(i, i+1);
-        if(act==="del") removePin(i);
-        if(act==="edit") editPin(i);
-      }, {passive:true});
+    const sub = document.createElement("div");
+    sub.className="tsub";
+    const pills = [];
+    pills.push({label: fmtTime(p.ts)});
+    if(photoCount>0) pills.push({label:`写真 ${photoCount}枚`});
+    if(p.acc!=null) pills.push({label:`誤差 ${Math.round(p.acc)}m`});
+    pills.forEach(pl=>{
+      const s = document.createElement("span");
+      s.className="pill";
+      s.textContent = pl.label;
+      sub.appendChild(s);
     });
 
-    row.addEventListener("click", (ev)=>{
-      // ignore clicks on buttons
-      if(ev.target?.closest("button")) return;
-      map.easeTo({ center: p.lngLat, zoom: Math.max(map.getZoom(), 15), duration: 420 });
+    meta.appendChild(name);
+    meta.appendChild(sub);
+
+    div.appendChild(badge);
+    div.appendChild(meta);
+
+    div.addEventListener("click", ()=>{
+      setActivePin(p.id, true);
+    });
+    // Right-click delete on desktop
+    div.addEventListener("contextmenu", (ev)=>{
+      ev.preventDefault();
+      if(confirm("このピンを削除しますか？")){
+        deletePin(p.id);
+      }
     });
 
-    UI.pinList.appendChild(row);
-  }
+    el.appendChild(div);
+  });
 }
 
-function escapeHtml(s){
-  return String(s)
-    .replaceAll("&","&amp;")
-    .replaceAll("<","&lt;")
-    .replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;")
-    .replaceAll("'","&#039;");
+function renderActiveEditor(){
+  const memoBox = $("#memoBox");
+  const strip = $("#photoStrip");
+  const p = state.pins.find(x=>x.id===state.activePinId);
+  memoBox.disabled = !p;
+  memoBox.value = p?.memo || "";
+  strip.innerHTML = "";
+  if(!p) return;
+
+  (p.photos||[]).forEach(ph=>{
+    const img = document.createElement("img");
+    img.className="thumb";
+    img.src = ph.dataUrl;
+    img.title = ph.name || "写真";
+    img.addEventListener("click", ()=>{
+      // remove photo
+      if(confirm("この写真をこのピンから外しますか？")){
+        p.photos = p.photos.filter(x=>x.id!==ph.id);
+        renderAll();
+      }
+    });
+    strip.appendChild(img);
+  });
 }
 
-function swap(a,b){
-  if(b<0 || b>=state.pins.length) return;
-  const tmp = state.pins[a];
-  state.pins[a] = state.pins[b];
-  state.pins[b] = tmp;
-  save();
-  renderAll();
-}
-
-function removePin(i){
-  state.pins.splice(i,1);
-  save();
-  renderAll();
-}
-
-async function editPin(i){
-  const p = state.pins[i];
-  const name = prompt("Pin name", p.name || `Pin ${i+1}`);
-  if(name === null) return;
-  const note = prompt("Note (optional)", p.note || "");
-  if(note === null) return;
-  p.name = name.trim();
-  p.note = note.trim();
-  save();
-  renderAll();
-}
-
-function updateButtons(){
-  UI.btnPlay.disabled = state.pins.length < 2 || state.playing;
-  UI.btnStop.disabled = !state.playing;
-  UI.btnPin.disabled = state.playing;
-  UI.btnClear.disabled = state.pins.length === 0 || state.playing;
-}
-
-function computeAutoDurationSec(){
-  const N = state.pins.length;
-  if(N < 2) return 30;
-  let Dm = 0;
-  for(let i=1;i<N;i++) Dm += distM(state.pins[i-1].lngLat, state.pins[i].lngLat);
-  const D = Dm/1000; // km
-
-  // Heuristic: distance + complexity (pins)
-  const T = 20 + 8*Math.log2(Math.max(2,N)) + 12*Math.sqrt(Math.max(0.01, D));
-  return clamp(Math.round(T), 30, 90);
-}
-
-function getSelectedDurationSec(){
-  const mode = UI.durationMode.value;
-  if(mode === "auto") return computeAutoDurationSec();
-  const v = Number(mode);
-  if(Number.isFinite(v)) return clamp(v, 30, 90);
-  return 60;
-}
-
-function renderAutoHint(){
-  const t = computeAutoDurationSec();
-  UI.autoHint.textContent = `AUTO: ${t}s`;
+function updateDurationHint(){
+  const hint = $("#durationHint");
+  const auto = calcAutoDurationSec();
+  hint.textContent = `自動: ${auto}秒`;
 }
 
 function renderAll(){
-  renderList();
-  renderAutoHint();
-  updateMapData();
-  updateButtons();
+  updateMapSources();
+  renderTimeline();
+  renderActiveEditor();
+  updateDurationHint();
 }
 
-/* ---------- Geolocation Pin ---------- */
-function setGpsHint(text){ UI.gpsHint.textContent = `GPS: ${text}`; }
+// ---- Pin management ----
+function setActivePin(id, flyTo){
+  state.activePinId = id;
+  const p = state.pins.find(x=>x.id===id);
+  if(p && flyTo && state.map){
+    state.map.easeTo({ center:[p.lng,p.lat], zoom: 14, duration: 700 });
+  }
+  renderAll();
+}
 
-async function addPinFromGPS(){
-  if(!navigator.geolocation){
-    toast("Geolocation not supported");
+function addPinFromPosition(pos){
+  const { latitude, longitude, accuracy } = pos.coords;
+  const ts = pos.timestamp ? new Date(pos.timestamp).toISOString() : nowISO();
+
+  const pin = { id: genId(), lat: latitude, lng: longitude, ts, acc: accuracy ?? null, memo:"", photos:[] };
+  state.pins.push(pin);
+  setActivePin(pin.id, true);
+
+  if(accuracy != null && accuracy > 60){
+    toast(`精度が低めです（誤差 約${Math.round(accuracy)}m）。必要なら少し待ってもう一度。`, 3200);
+  }else{
+    toast("ピンを追加しました。", 1600);
+  }
+
+  // auto frame
+  fitToPinsIfNeeded();
+}
+
+function fitToPinsIfNeeded(){
+  if(!state.map) return;
+  if(state.pins.length === 1){
+    const p = state.pins[0];
+    state.map.easeTo({ center:[p.lng,p.lat], zoom: 14, pitch: 65, bearing:-20, duration: 700 });
     return;
   }
-  setGpsHint("requesting…");
-  UI.btnPin.disabled = true;
+  if(state.pins.length >= 2){
+    const bounds = new maplibregl.LngLatBounds();
+    state.pins.forEach(p=>bounds.extend([p.lng,p.lat]));
+    state.map.fitBounds(bounds, { padding: 80, duration: 800, maxZoom: 15 });
+  }
+}
+
+function deletePin(id){
+  const idx = state.pins.findIndex(p=>p.id===id);
+  if(idx<0) return;
+  state.pins.splice(idx,1);
+  if(state.activePinId===id){
+    state.activePinId = state.pins[idx]?.id || state.pins[idx-1]?.id || null;
+  }
+  renderAll();
+}
+
+// ---- Geolocation (single shot) ----
+async function pinCurrentLocation(){
+  if(!navigator.geolocation){
+    toast("このブラウザでは位置情報が使えません。", 2800);
+    return;
+  }
+  toast("位置情報を取得中…（数秒）", 1400);
 
   const opts = { enableHighAccuracy: true, timeout: 9000, maximumAge: 0 };
-
   navigator.geolocation.getCurrentPosition(
-    (pos)=>{
-      const { latitude, longitude, accuracy } = pos.coords;
-      state.lastFix = { latitude, longitude, accuracy };
-      const id = crypto?.randomUUID?.() || String(Date.now() + Math.random());
-      const idx = state.pins.length + 1;
-
-      const p = {
-        id,
-        lngLat: [longitude, latitude],
-        accuracyM: accuracy,
-        time: pos.timestamp ? new Date(pos.timestamp).toISOString() : nowIso(),
-        name: `Pin ${idx}`,
-        note: "",
-      };
-
-      // quality guard
-      if(typeof accuracy === "number" && accuracy > 80){
-        toast(`Accuracy is low (±${Math.round(accuracy)}m). Consider moving to open sky and try again.`);
-      }else{
-        toast(`Pinned! (±${Math.round(accuracy)}m)`);
-      }
-
-      state.pins.push(p);
-      save();
-      renderAll();
-
-      // Gentle camera move to new pin
-      map.easeTo({ center: p.lngLat, zoom: Math.max(map.getZoom(), 15), duration: 500 });
-
-      setGpsHint(`OK ±${Math.round(accuracy)}m`);
-      UI.btnPin.disabled = false;
-    },
+    (pos)=> addPinFromPosition(pos),
     (err)=>{
       console.warn(err);
-      const msg = err.code === 1 ? "Permission denied" :
-                  err.code === 2 ? "Position unavailable" :
-                  err.code === 3 ? "Timeout" : "Error";
-      setGpsHint(msg);
-      toast(`GPS error: ${msg}`);
-      UI.btnPin.disabled = false;
+      if(err.code===1) toast("位置情報が許可されていません。設定から許可してください。", 3600);
+      else if(err.code===3) toast("位置情報の取得がタイムアウトしました。屋外で再度お試しください。", 3200);
+      else toast("位置情報の取得に失敗しました。", 2600);
     },
     opts
   );
 }
 
-/* ---------- Flyover ---------- */
-function densifyPath(coords){
-  // Insert points so camera motion is smooth.
-  // Strategy: split each segment into ~every 25m (clamped).
-  const out = [];
-  for(let i=0;i<coords.length-1;i++){
-    const a = coords[i];
-    const b = coords[i+1];
-    const d = distM(a,b);
-    const step = clamp(d / 25, 2, 120); // number of pieces
-    for(let s=0;s<step;s++){
-      const t = s/step;
-      out.push([ a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t ]);
+// ---- Photo import & auto assign by capture time ----
+async function readAsDataURL(file){
+  return new Promise((res, rej)=>{
+    const fr = new FileReader();
+    fr.onload = ()=>res(fr.result);
+    fr.onerror = rej;
+    fr.readAsDataURL(file);
+  });
+}
+
+// resize to keep JSON reasonable
+async function resizeDataUrl(dataUrl, maxSide=1280, quality=0.85){
+  const img = new Image();
+  img.src = dataUrl;
+  await img.decode().catch(()=>{});
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if(!w || !h) return dataUrl;
+  const scale = Math.min(1, maxSide / Math.max(w,h));
+  const cw = Math.round(w*scale);
+  const ch = Math.round(h*scale);
+
+  const canvas = document.createElement("canvas");
+  canvas.width=cw; canvas.height=ch;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0,0,cw,ch);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+function nearestPinByTime(tsISO){
+  const t = new Date(tsISO).getTime();
+  let best=null, bestDt=Infinity;
+  for(const p of state.pins){
+    const pt = new Date(p.ts).getTime();
+    const dt = Math.abs(pt - t);
+    if(dt < bestDt){
+      bestDt = dt; best = p;
     }
   }
-  out.push(coords[coords.length-1]);
-  return out;
+  return best;
+}
+
+async function importPhotos(files){
+  if(state.pins.length === 0){
+    toast("先にピンをいくつか打ってから写真を読み込んでください。", 3200);
+    return;
+  }
+  const list = Array.from(files || []);
+  if(list.length===0) return;
+
+  toast(`写真を処理中…（${list.length}枚）`, 2200);
+
+  for(const file of list){
+    let exifTime = null;
+    try{
+      const data = await exifr.parse(file, { tiff:true, exif:true, ifd0:true });
+      // DateTimeOriginal is typical; fallback to CreateDate/ModifyDate
+      const dt = data?.DateTimeOriginal || data?.CreateDate || data?.ModifyDate;
+      if(dt instanceof Date) exifTime = dt.toISOString();
+    }catch(e){
+      // ignore
+    }
+    if(!exifTime){
+      // fallback: file lastModified
+      exifTime = new Date(file.lastModified || Date.now()).toISOString();
+    }
+
+    const dataUrl0 = await readAsDataURL(file);
+    const dataUrl = await resizeDataUrl(dataUrl0);
+
+    const pin = nearestPinByTime(exifTime) || state.pins[state.pins.length-1];
+    pin.photos = pin.photos || [];
+    pin.photos.push({
+      id: genId(),
+      ts: exifTime,
+      name: file.name,
+      dataUrl
+    });
+  }
+
+  renderAll();
+  toast("写真を割り当てました。タイムラインを確認してください。", 2600);
+}
+
+// ---- Flyover ----
+function calcTotalDistanceKm(){
+  if(state.pins.length < 2) return 0;
+  let d=0;
+  for(let i=1;i<state.pins.length;i++){
+    d += haversineKm({lat:state.pins[i-1].lat, lng:state.pins[i-1].lng}, {lat:state.pins[i].lat, lng:state.pins[i].lng});
+  }
+  return d;
+}
+function calcAutoDurationSec(){
+  const N = Math.max(1, state.pins.length);
+  const D = calcTotalDistanceKm();
+  // 20 + 8*log2(N) + 12*sqrt(D), clamp 30..90
+  const t = 20 + 8*Math.log2(N) + 12*Math.sqrt(Math.max(0,D));
+  return Math.round(clamp(t, 30, 90));
+}
+
+function densifyPins(stepMeters=35){
+  // Create smooth path points along line segments.
+  const pts = state.pins.map(p=>({lng:p.lng, lat:p.lat, id:p.id, ts:p.ts}));
+  if(pts.length<2) return {points: pts, meta: []};
+
+  const out=[];
+  const meta=[]; // {pinId, atIndex}
+  let idx=0;
+  out.push({lng:pts[0].lng, lat:pts[0].lat});
+  meta.push({pinId: pts[0].id, atIndex: 0});
+
+  for(let i=1;i<pts.length;i++){
+    const a = pts[i-1], b = pts[i];
+    const distKm = haversineKm({lat:a.lat,lng:a.lng},{lat:b.lat,lng:b.lng});
+    const distM = distKm*1000;
+    const steps = Math.max(1, Math.floor(distM/stepMeters));
+    for(let s=1;s<=steps;s++){
+      const t = s/steps;
+      const lng = a.lng + (b.lng-a.lng)*t;
+      const lat = a.lat + (b.lat-a.lat)*t;
+      out.push({lng,lat});
+      idx++;
+    }
+    meta.push({pinId: b.id, atIndex: idx});
+  }
+  return {points: out, meta};
+}
+
+function getDurationSec(){
+  const m = $("#durationMode").value;
+  if(m==="auto") return calcAutoDurationSec();
+  return parseInt(m,10) || 60;
+}
+
+function showOverlayForPin(pinId){
+  const p = state.pins.find(x=>x.id===pinId);
+  if(!p) return;
+
+  const idx = state.pins.findIndex(x=>x.id===pinId);
+  $("#ovTitle").textContent = `ポイント ${idx+1}`;
+  const meta = `${fmtTime(p.ts)}  •  写真 ${(p.photos?.length||0)}枚`;
+  $("#ovMeta").textContent = meta;
+
+  const memo = (p.memo||"").trim();
+  $("#ovMemo").textContent = memo ? memo : "（メモなし）";
+
+  const img = $("#ovImg");
+  const ph = p.photos?.[0];
+  if(ph?.dataUrl){
+    img.src = ph.dataUrl;
+    img.classList.remove("hidden");
+  }else{
+    img.classList.add("hidden");
+    img.removeAttribute("src");
+  }
+
+  $("#overlay").classList.remove("hidden");
+  clearTimeout(showOverlayForPin._timer);
+  showOverlayForPin._timer = setTimeout(()=>$("#overlay").classList.add("hidden"), 2500);
 }
 
 function startFlyover(){
-  if(state.pins.length < 2 || state.playing) return;
+  if(state.fly.running){
+    stopFlyover();
+    return;
+  }
+  if(!state.map || state.pins.length < 2){
+    toast("フライオーバーにはピンが2つ以上必要です。", 2600);
+    return;
+  }
 
-  const durationSec = getSelectedDurationSec();
-  state.playDurationMs = durationSec * 1000;
-  state.playStartMs = performance.now();
-  state.playing = true;
+  const dur = getDurationSec();
+  const {points, meta} = densifyPins(35); // smoother
+  if(points.length < 2){
+    toast("ルートが短すぎます。", 2200);
+    return;
+  }
 
-  // Build path
-  const coords = state.pins.map(p => p.lngLat);
-  state.path = densifyPath(coords);
+  state.fly.running = true;
+  state.fly.start = performance.now();
+  state.fly.duration = dur * 1000;
+  state.fly.points = points;
+  state.fly.meta = meta;
+  state.fly.shown = new Set();
 
-  // Prep camera
-  map.easeTo({
-    center: state.path[0],
-    zoom: 15.8,
-    pitch: 72,
-    bearing: 0,
-    duration: 500
-  });
+  $("#btnFly").textContent = "フライオーバー停止 ■";
+  $("#overlay").classList.add("hidden");
 
-  updateButtons();
-  toast(`Flyover: ${durationSec}s (Tip: iPhone screen recording to save video)`);
+  // set cinematic-ish camera for option ② (closer, forward-looking)
+  state.map.easeTo({ pitch: 72, zoom: 15.2, duration: 700 });
 
-  const tick = (now)=>{
-    if(!state.playing) return;
-    const t = clamp((now - state.playStartMs) / state.playDurationMs, 0, 1);
+  const step = (tNow) => {
+    if(!state.fly.running) return;
+    const t = tNow - state.fly.start;
+    const p = clamp(t / state.fly.duration, 0, 1);
+    const idx = Math.floor(p * (state.fly.points.length - 1));
+    const cur = state.fly.points[idx];
+    const next = state.fly.points[Math.min(idx+8, state.fly.points.length-1)];
 
-    // ease-in-out
-    const te = t<0.5 ? 2*t*t : 1 - Math.pow(-2*t+2,2)/2;
+    // bearing toward next point
+    const bearing = calcBearing(cur, next);
 
-    const idx = Math.floor(te * (state.path.length-1));
-    const p = state.path[idx];
-    const pNext = state.path[Math.min(idx+1, state.path.length-1)];
-    const brg = bearingDeg(p, pNext);
+    // zoom dynamics: small pulse based on speed/curvature-ish
+    const z = 15.2;
 
-    // Close/adventurous style (②): keep zoomed in, look ahead
-    // Zoom slightly varies with progress and segment length for comfort.
-    const zoom = 15.6 + 0.4*Math.sin(te*Math.PI);
-    const pitch = 72;
+    state.map.jumpTo({ center: [cur.lng, cur.lat], bearing, zoom: z, pitch: 72 });
 
-    map.jumpTo({ center: p, bearing: brg, pitch, zoom });
+    // Overlay: show at each pin arrival index (meta atIndex)
+    for(const m of state.fly.meta){
+      if(!state.fly.shown.has(m.pinId) && idx >= m.atIndex){
+        state.fly.shown.add(m.pinId);
+        showOverlayForPin(m.pinId);
+      }
+    }
 
-    if(t >= 1){
+    if(t >= state.fly.duration){
       stopFlyover(true);
       return;
     }
-    state.playRaf = requestAnimationFrame(tick);
+    state.fly.raf = requestAnimationFrame(step);
   };
+  state.fly.raf = requestAnimationFrame(step);
 
-  state.playRaf = requestAnimationFrame(tick);
+  toast(`フライオーバー開始（${dur}秒）`, 1600);
 }
 
-function stopFlyover(soft=false){
-  state.playing = false;
-  if(state.playRaf) cancelAnimationFrame(state.playRaf);
-  state.playRaf = null;
-  updateButtons();
-  if(!soft) toast("Stopped");
+function stopFlyover(ended=false){
+  state.fly.running = false;
+  if(state.fly.raf) cancelAnimationFrame(state.fly.raf);
+  state.fly.raf = null;
+  $("#btnFly").textContent = "フライオーバー再生 ▶";
+  if(ended) toast("再生が完了しました。", 1800);
 }
 
-/* ---------- Events ---------- */
-UI.btnPin.addEventListener("click", addPinFromGPS);
-UI.btnPlay.addEventListener("click", startFlyover);
-UI.btnStop.addEventListener("click", ()=>stopFlyover(false));
-UI.btnClear.addEventListener("click", ()=>{
-  if(!confirm("Clear all pins?")) return;
-  state.pins = [];
-  save();
-  renderAll();
-});
-UI.btnLocate.addEventListener("click", ()=>{
-  if(state.pins.length){
-    map.easeTo({ center: state.pins[state.pins.length-1].lngLat, zoom: Math.max(map.getZoom(), 14), duration: 450 });
-  }else{
-    map.easeTo({ center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, duration: 450 });
+function calcBearing(a,b){
+  // a,b: {lat,lng}
+  const toRad=(x)=>x*Math.PI/180;
+  const toDeg=(x)=>x*180/Math.PI;
+  const lat1=toRad(a.lat), lat2=toRad(b.lat);
+  const dLng=toRad(b.lng-a.lng);
+  const y=Math.sin(dLng)*Math.cos(lat2);
+  const x=Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLng);
+  let brng = toDeg(Math.atan2(y,x));
+  brng = (brng + 360) % 360;
+  return brng;
+}
+
+// ---- Save/Load (IndexedDB via idb-keyval) ----
+async function getSavedList(){
+  const list = await idbKeyval.get(DB_KEY_LIST);
+  return Array.isArray(list) ? list : [];
+}
+async function setSavedList(list){
+  await idbKeyval.set(DB_KEY_LIST, list);
+}
+function buildSnapshot(){
+  return {
+    version: 3,
+    title: buildDefaultTitle(),
+    createdAt: nowISO(),
+    updatedAt: nowISO(),
+    pins: state.pins
+  };
+}
+function buildDefaultTitle(){
+  const d = new Date();
+  const pad=(n)=>String(n).padStart(2,'0');
+  return `旅 ${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+
+async function refreshSavedSelect(){
+  const sel = $("#savedSelect");
+  const list = await getSavedList();
+  sel.innerHTML = "";
+  if(list.length===0){
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "（保存済みデータなし）";
+    sel.appendChild(opt);
+    return;
   }
-});
+  list.forEach(item=>{
+    const opt = document.createElement("option");
+    opt.value = item.key;
+    opt.textContent = `${item.title}（更新: ${fmtTime(item.updatedAt)}）`;
+    sel.appendChild(opt);
+  });
+}
 
-UI.durationMode.addEventListener("change", ()=>{
-  renderAutoHint();
-  toast(UI.durationMode.value==="auto" ? "Duration: AUTO" : `Duration: ${UI.durationMode.value}s`);
-});
+async function saveToDevice(){
+  const snap = buildSnapshot();
+  const list = await getSavedList();
 
-UI.btnExport.addEventListener("click", exportJson);
-UI.fileImport.addEventListener("change", (e)=>{
-  const f = e.target.files?.[0];
-  if(!f) return;
-  importJson(f);
-  e.target.value = "";
-});
+  // if a saved item selected, overwrite; else create new
+  const selKey = $("#savedSelect").value || null;
+  let key = selKey;
+  if(!key || key===""){
+    key = DB_KEY_PREFIX + genId();
+    list.unshift({ key, title: snap.title, updatedAt: snap.updatedAt });
+  }else{
+    const idx = list.findIndex(x=>x.key===key);
+    if(idx>=0){
+      list[idx].updatedAt = snap.updatedAt;
+      list[idx].title = snap.title;
+    }else{
+      list.unshift({ key, title: snap.title, updatedAt: snap.updatedAt });
+    }
+  }
 
-/* ---------- Boot ---------- */
-load();
-renderAll();
-setGpsHint("tap PIN");
+  await idbKeyval.set(key, snap);
+  await setSavedList(list);
+  await refreshSavedSelect();
+  $("#savedSelect").value = key;
+  toast("端末に保存しました。", 2000);
+}
 
+async function loadFromDevice(){
+  const key = $("#savedSelect").value;
+  if(!key){ toast("読み込むデータがありません。", 2200); return; }
+  const snap = await idbKeyval.get(key);
+  if(!snap?.pins){ toast("データが壊れている可能性があります。", 2600); return; }
+  state.pins = snap.pins;
+  state.activePinId = state.pins[0]?.id || null;
+  renderAll();
+  fitToPinsIfNeeded();
+  toast("読み込みました。", 1600);
+}
+
+async function deleteFromDevice(){
+  const key = $("#savedSelect").value;
+  if(!key){ toast("削除するデータがありません。", 2200); return; }
+  if(!confirm("この保存データを削除しますか？")) return;
+
+  await idbKeyval.del(key);
+  let list = await getSavedList();
+  list = list.filter(x=>x.key!==key);
+  await setSavedList(list);
+  await refreshSavedSelect();
+  toast("削除しました。", 1600);
+}
+
+// ---- JSON Export/Import ----
+function downloadText(filename, text){
+  const blob = new Blob([text], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1500);
+}
+
+function exportJSON(){
+  const snap = buildSnapshot();
+  snap.updatedAt = nowISO();
+  const json = JSON.stringify(snap, null, 2);
+  const d = new Date();
+  const pad=(n)=>String(n).padStart(2,'0');
+  const filename = `adventure-note-${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  downloadText(filename, json);
+  toast("JSONを書き出しました。", 1800);
+}
+
+async function importJSONFile(file){
+  const text = await file.text();
+  let obj=null;
+  try{ obj = JSON.parse(text); }catch(e){
+    toast("JSONの読み込みに失敗しました（形式が正しくありません）。", 3200);
+    return;
+  }
+  if(!obj?.pins || !Array.isArray(obj.pins)){
+    toast("このJSONは読み込めません（pinsがありません）。", 3200);
+    return;
+  }
+  state.pins = obj.pins;
+  state.activePinId = state.pins[0]?.id || null;
+  renderAll();
+  fitToPinsIfNeeded();
+  toast("JSONを読み込みました。", 1800);
+}
+
+// ---- Clear/New ----
+function newTrip(){
+  if(state.pins.length>0 && !confirm("現在のデータをクリアして新しい旅を始めますか？")) return;
+  stopFlyover();
+  state.pins = [];
+  state.activePinId = null;
+  $("#memoBox").value = "";
+  renderAll();
+  toast("新しい旅を開始しました。", 1600);
+}
+
+// ---- Wire UI ----
+function wireUI(){
+  $("#btnPin").addEventListener("click", pinCurrentLocation);
+  $("#btnFly").addEventListener("click", startFlyover);
+
+  $("#memoBox").addEventListener("input", ()=>{
+    const p = state.pins.find(x=>x.id===state.activePinId);
+    if(!p) return;
+    p.memo = $("#memoBox").value;
+    renderTimeline();
+  });
+
+  $("#photoInput").addEventListener("change", (e)=>{
+    importPhotos(e.target.files);
+    e.target.value = "";
+  });
+
+  $("#durationMode").addEventListener("change", ()=>{
+    updateDurationHint();
+  });
+
+  $("#btnSave").addEventListener("click", saveToDevice);
+  $("#btnLoad").addEventListener("click", loadFromDevice);
+  $("#btnDelete").addEventListener("click", deleteFromDevice);
+  $("#btnExport").addEventListener("click", exportJSON);
+  $("#jsonInput").addEventListener("change", async (e)=>{
+    const f = e.target.files?.[0];
+    if(f) await importJSONFile(f);
+    e.target.value = "";
+  });
+  $("#btnNew").addEventListener("click", newTrip);
+
+  // initial saved list
+  refreshSavedSelect();
+}
+
+// ---- Boot ----
+(async function boot(){
+  wireUI();
+  await initMap();
+})();

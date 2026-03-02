@@ -3,67 +3,132 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Pin Flyover (MVP)</title>
-  <link href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" rel="stylesheet" />
+  <title>アドベンチャーノート（ピン＋フライオーバー）</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <div id="app">
-    <div id="map"></div>
-
-    <div id="hud">
-      <div class="row top">
-        <div class="brand">
-          <div class="title">Pin Flyover</div>
-          <div class="sub">Tap “PIN” to add a point, connect with a line, and play a 3D flyover.</div>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">🗺️</div>
+        <div class="titleblock">
+          <div class="title">アドベンチャーノート</div>
+          <div class="subtitle">ピンで旅を記録して、3Dで飛ぶ</div>
         </div>
-        <button id="btnLocate" class="btn ghost" title="center map">Center</button>
       </div>
 
-      <div class="row controls">
-        <button id="btnPin" class="btn primary">PIN</button>
-        <button id="btnPlay" class="btn" disabled>Flyover ▶</button>
-        <button id="btnStop" class="btn ghost" disabled>Stop</button>
-        <button id="btnClear" class="btn danger ghost">Clear</button>
-      </div>
+      <div class="controls">
+        <button id="btnPin" class="btn primary">現在地を記録</button>
+        <button id="btnFly" class="btn">フライオーバー再生 ▶</button>
 
-      <div class="row controls small">
-        <label class="pill">
-          <span>Duration</span>
-          <select id="durationMode">
-            <option value="auto" selected>AUTO (30–90s)</option>
-            <option value="30">30s</option>
-            <option value="45">45s</option>
-            <option value="60">60s</option>
-            <option value="90">90s</option>
+        <div class="seg">
+          <label class="seglabel">再生時間</label>
+          <select id="durationMode" class="select">
+            <option value="auto">自動（推奨）</option>
+            <option value="30">30秒</option>
+            <option value="45">45秒</option>
+            <option value="60">60秒</option>
+            <option value="90">90秒</option>
           </select>
-        </label>
-        <div class="pill" id="autoHint">AUTO: --s</div>
-        <div class="pill" id="gpsHint">GPS: --</div>
-      </div>
-
-      <div id="panel">
-        <div class="panelHeader">
-          <div class="panelTitle">Pins</div>
-          <div class="panelMeta"><span id="pinCount">0</span> points</div>
-        </div>
-
-        <div id="pinList"></div>
-
-        <div class="panelFooter">
-          <button id="btnExport" class="btn ghost">Export JSON</button>
-          <label class="btn ghost file">
-            Import JSON
-            <input id="fileImport" type="file" accept="application/json" />
-          </label>
+          <span id="durationHint" class="hint">自動: --秒</span>
         </div>
       </div>
+    </header>
 
-      <div id="toast" class="toast" hidden></div>
-    </div>
+    <main class="main">
+      <aside class="panel">
+        <div class="section">
+          <div class="sectionTitle">📌 タイムライン</div>
+          <div id="timeline" class="timeline"></div>
+          <div class="smallhelp">
+            ヒント：ピンをタップすると地図が移動。長押しで削除。
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="sectionTitle">📝 メモ・写真</div>
+          <textarea id="memoBox" class="textarea" placeholder="選択中のピンにメモを入力（例：ここで昼ごはん）"></textarea>
+
+          <div class="row">
+            <label class="filebtn">
+              <input id="photoInput" type="file" accept="image/*" multiple />
+              写真を読み込む（撮影時刻で自動割り当て）
+            </label>
+          </div>
+
+          <div id="photoStrip" class="photostrip"></div>
+          <div class="smallhelp">
+            ※撮影時刻（EXIF）が読めない写真は、いちばん近い時刻のピンに割り当てます。
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="sectionTitle">💾 保存とバックアップ</div>
+
+          <div class="row two">
+            <button id="btnSave" class="btn">端末に保存</button>
+            <button id="btnNew" class="btn ghost">新しい旅（クリア）</button>
+          </div>
+
+          <div class="row">
+            <select id="savedSelect" class="select wide"></select>
+          </div>
+          <div class="row two">
+            <button id="btnLoad" class="btn">読み込む</button>
+            <button id="btnDelete" class="btn danger ghost">削除</button>
+          </div>
+
+          <div class="row two">
+            <button id="btnExport" class="btn ghost">JSON書き出し</button>
+            <label class="filebtn ghost">
+              <input id="jsonInput" type="file" accept="application/json" />
+              JSON読み込み
+            </label>
+          </div>
+
+          <div class="smallhelp">
+            端末に保存したデータを読み込むと、いつでも再生（再動画化）できます。
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="sectionTitle">ℹ️ 使い方</div>
+          <ol class="howto">
+            <li>「現在地を記録」でピンを打つ</li>
+            <li>必要ならメモや写真を追加</li>
+            <li>「フライオーバー再生」で3Dマップを自動再生</li>
+            <li>動画にしたい場合は <b>iPhoneの画面収録</b> を使う</li>
+          </ol>
+        </div>
+      </aside>
+
+      <section class="mapWrap">
+        <div id="map" class="map"></div>
+
+        <div id="toast" class="toast hidden"></div>
+
+        <div id="overlay" class="overlay hidden">
+          <div class="overlayCard">
+            <div class="overlayTop">
+              <div id="ovTitle" class="ovTitle">ポイント</div>
+              <div id="ovMeta" class="ovMeta"></div>
+            </div>
+            <div id="ovMemo" class="ovMemo"></div>
+            <img id="ovImg" class="ovImg hidden" alt="写真" />
+          </div>
+        </div>
+
+        <div class="watermark">
+          MapLibre + OpenFreeMap / Terrain: Terrarium DEM
+        </div>
+      </section>
+    </main>
   </div>
 
-  <script src="https://unpkg.com/maplibre-gl/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/idb-keyval@6/dist/umd.js"></script>
+  <script src="https://unpkg.com/exifr/dist/lite.umd.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
