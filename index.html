@@ -1,91 +1,24 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>アドベンチャーノート（ピン軌跡）</title>
-  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
-  <link rel="stylesheet" href="./style.css" />
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Adventure Note</title>
+
+<link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet"/>
+<script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+
+<link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-  <div id="app">
-    <header class="topbar">
-      <div class="brand">
-        <div class="logo">🧭</div>
-        <div class="titleblock">
-          <div class="title">アドベンチャーノート</div>
-          <div class="subtitle">平面地図でピンをつないで軌跡を作る</div>
-        </div>
-      </div>
-      <div class="top-actions">
-        <button id="btnSave" class="btn ghost">端末に保存</button>
-        <button id="btnExport" class="btn ghost">JSON書き出し</button>
-        <label class="btn ghost file">
-          JSON読み込み
-          <input id="fileImportJson" type="file" accept="application/json" />
-        </label>
-      </div>
-    </header>
 
-    <main class="main">
-      <div id="map" class="map"></div>
+<div id="map"></div>
 
-      <!-- 右下フローティング -->
-      <div class="fab">
-        <button id="btnPin" class="btn primary big">現在地を記録</button>
-        <div class="row">
-          <button id="btnAuto" class="btn">自動記録：開始</button>
-          <select id="autoInterval" class="select">
-            <option value="180000">3分ごと</option>
-            <option value="60000">1分ごと</option>
-            <option value="300000">5分ごと</option>
-          </select>
-        </div>
-      </div>
+<button id="recordBtn">📍 現在地を記録</button>
+<button id="autoBtn">▶ 自動記録（3分間隔）</button>
+<input type="file" id="photoInput" multiple accept="image/*"/>
 
-      <!-- 下部パネル -->
-      <section class="panel">
-        <div class="panel-head">
-          <div class="panel-title">タイムライン</div>
-          <div class="panel-actions">
-            <label class="btn file">
-              写真を読み込む（時刻/位置で自動配置）
-              <input id="filePhotos" type="file" accept="image/*" multiple />
-            </label>
-            <select id="savedSelect" class="select">
-              <option value="">保存済みデータ…</option>
-            </select>
-            <button id="btnLoad" class="btn">読み込む</button>
-            <button id="btnDelete" class="btn danger">削除</button>
-            <button id="btnClear" class="btn ghost">全消去</button>
-          </div>
-        </div>
-
-        <div id="timeline" class="timeline"></div>
-
-        <div class="editor">
-          <div class="editor-left">
-            <div class="label">選択中ピンのメモ</div>
-            <textarea id="memo" placeholder="例：ここで休憩、景色が良い、など"></textarea>
-          </div>
-          <div class="editor-right">
-            <div class="stats" id="stats"></div>
-            <div class="hint">
-              ・ピンは時系列順に線でつながります。<br/>
-              ・矢印が移動方向を示します。<br/>
-              ・自動記録は前面表示中のみ安定します（iPhoneのWeb制約）。
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <div id="toast" class="toast" aria-live="polite"></div>
-    </main>
-  </div>
-
-  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-  <script src="https://unpkg.com/idb-keyval@6/dist/umd.js"></script>
-  <script src="https://unpkg.com/exifr/dist/lite.umd.js"></script>
-  <script src="./app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
