@@ -47,6 +47,23 @@ html,body{ height:100%; margin:0; font-family: -apple-system, BlinkMacSystemFont
 }
 .btn.ghost{ background: rgba(18,27,59,0.35); }
 .btn.danger{ border-color: rgba(255,107,107,0.35); }
+
+/* Floating action button (PIN) */
+.fab{
+  position: absolute;
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 20;
+  padding: 14px 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: linear-gradient(180deg, rgba(255,205,115,0.95), rgba(255,185,70,0.92));
+  color: rgba(40,30,10,0.95);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  box-shadow: 0 10px 26px rgba(0,0,0,0.35);
+}
+.fab:active{ transform: translateY(1px) scale(0.995); }
 .select{
   padding:10px 10px; border-radius: 14px; border:1px solid rgba(255,255,255,0.12);
   background: rgba(18,27,59,0.65); color:var(--text);

@@ -53,8 +53,9 @@ async function initMap(){
     style: styleUrl,
     center: [137.0, 36.6],
     zoom: 10,
-    pitch: 65,
-    bearing: -20,
+    // 通常表示は見やすい「平面地図」
+    pitch: 0,
+    bearing: 0,
     antialias: true
   });
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
@@ -71,7 +72,7 @@ async function initMap(){
         tileSize: 256,
         maxzoom: 14
       });
-      map.setTerrain({ source: "terrain-dem", exaggeration: 1.4 });
+      // ※通常時は地形(3D)をOFF。フライオーバー時のみONにします。
     }catch(e){
       console.warn("terrain setup failed", e);
     }
@@ -136,6 +137,27 @@ async function initMap(){
     renderAll();
     toast("準備OK。まず「現在地を記録」を押してみてください。", 2600);
   });
+}
+
+function enableFlyMode(){
+  // フライオーバー時だけ3D地形＋高いピッチにする
+  if(!state.map) return;
+  try{
+    if(state.map.getSource("terrain-dem")){
+      state.map.setTerrain({ source: "terrain-dem", exaggeration: 1.4 });
+    }
+  }catch(e){
+    console.warn("enableFlyMode terrain failed", e);
+  }
+}
+
+function disableFlyMode(){
+  // 通常時は平面に戻す（視認性優先）
+  if(!state.map) return;
+  try{ state.map.setTerrain(null); }catch(e){ /* ignore */ }
+  try{
+    state.map.easeTo({ pitch: 0, bearing: 0, duration: 450 });
+  }catch(e){ /* ignore */ }
 }
 
 // ---- Rendering ----
@@ -273,7 +295,12 @@ function setActivePin(id, flyTo){
   state.activePinId = id;
   const p = state.pins.find(x=>x.id===id);
   if(p && flyTo && state.map){
-    state.map.easeTo({ center:[p.lng,p.lat], zoom: 14, duration: 700 });
+    const opts = { center:[p.lng,p.lat], zoom: 14, duration: 650 };
+    if(!state.fly.running){
+      opts.pitch = 0;
+      opts.bearing = 0;
+    }
+    state.map.easeTo(opts);
   }
   renderAll();
 }
@@ -300,13 +327,13 @@ function fitToPinsIfNeeded(){
   if(!state.map) return;
   if(state.pins.length === 1){
     const p = state.pins[0];
-    state.map.easeTo({ center:[p.lng,p.lat], zoom: 14, pitch: 65, bearing:-20, duration: 700 });
+    state.map.easeTo({ center:[p.lng,p.lat], zoom: 14, pitch: 0, bearing: 0, duration: 650 });
     return;
   }
   if(state.pins.length >= 2){
     const bounds = new maplibregl.LngLatBounds();
     state.pins.forEach(p=>bounds.extend([p.lng,p.lat]));
-    state.map.fitBounds(bounds, { padding: 80, duration: 800, maxZoom: 15 });
+    state.map.fitBounds(bounds, { padding: 80, duration: 750, maxZoom: 15, pitch: 0, bearing: 0 });
   }
 }
 
@@ -503,6 +530,36 @@ function showOverlayForPin(pinId){
   showOverlayForPin._timer = setTimeout(()=>$("#overlay").classList.add("hidden"), 2500);
 }
 
+function currentPinIdFromMeta(pointIndex){
+  // meta is ordered by pin order; return the latest pin whose atIndex <= pointIndex
+  let last = null;
+  for(const m of state.fly.meta){
+    if(m.atIndex <= pointIndex) last = m.pinId;
+    else break;
+  }
+  return last;
+}
+
+function scrollActiveTimelineIntoView(){
+  const wrap = $("#timeline");
+  const active = wrap?.querySelector?.(".titem.active");
+  if(!wrap || !active) return;
+  try{
+    active.scrollIntoView({ behavior: "smooth", block: "center" });
+  }catch(e){
+    // older iOS fallback
+    wrap.scrollTop = Math.max(0, active.offsetTop - wrap.clientHeight/2);
+  }
+}
+
+function setFlyActivePin(pinId){
+  // flyover中は地図を動かさず、ハイライト＋自動スクロールだけ更新
+  if(state.activePinId === pinId) return;
+  state.activePinId = pinId;
+  renderTimeline();
+  scrollActiveTimelineIntoView();
+}
+
 function startFlyover(){
   if(state.fly.running){
     stopFlyover();
@@ -521,6 +578,7 @@ function startFlyover(){
   }
 
   state.fly.running = true;
+  enableFlyMode();
   state.fly.start = performance.now();
   state.fly.duration = dur * 1000;
   state.fly.points = points;
@@ -557,6 +615,10 @@ function startFlyover(){
       }
     }
 
+    // Timeline: auto-scroll so "今どこ" が分かる
+    const curPinId = currentPinIdFromMeta(idx);
+    if(curPinId) setFlyActivePin(curPinId);
+
     if(t >= state.fly.duration){
       stopFlyover(true);
       return;
@@ -574,6 +636,7 @@ function stopFlyover(ended=false){
   state.fly.raf = null;
   $("#btnFly").textContent = "フライオーバー再生 ▶";
   if(ended) toast("再生が完了しました。", 1800);
+  disableFlyMode();
 }
 
 function calcBearing(a,b){
