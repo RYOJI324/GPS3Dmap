@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Pin Flyover (MVP)</title>
+  <link href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" rel="stylesheet" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="map"></div>
+
+    <div id="hud">
+      <div class="row top">
+        <div class="brand">
+          <div class="title">Pin Flyover</div>
+          <div class="sub">Tap “PIN” to add a point, connect with a line, and play a 3D flyover.</div>
+        </div>
+        <button id="btnLocate" class="btn ghost" title="center map">Center</button>
+      </div>
+
+      <div class="row controls">
+        <button id="btnPin" class="btn primary">PIN</button>
+        <button id="btnPlay" class="btn" disabled>Flyover ▶</button>
+        <button id="btnStop" class="btn ghost" disabled>Stop</button>
+        <button id="btnClear" class="btn danger ghost">Clear</button>
+      </div>
+
+      <div class="row controls small">
+        <label class="pill">
+          <span>Duration</span>
+          <select id="durationMode">
+            <option value="auto" selected>AUTO (30–90s)</option>
+            <option value="30">30s</option>
+            <option value="45">45s</option>
+            <option value="60">60s</option>
+            <option value="90">90s</option>
+          </select>
+        </label>
+        <div class="pill" id="autoHint">AUTO: --s</div>
+        <div class="pill" id="gpsHint">GPS: --</div>
+      </div>
+
+      <div id="panel">
+        <div class="panelHeader">
+          <div class="panelTitle">Pins</div>
+          <div class="panelMeta"><span id="pinCount">0</span> points</div>
+        </div>
+
+        <div id="pinList"></div>
+
+        <div class="panelFooter">
+          <button id="btnExport" class="btn ghost">Export JSON</button>
+          <label class="btn ghost file">
+            Import JSON
+            <input id="fileImport" type="file" accept="application/json" />
+          </label>
+        </div>
+      </div>
+
+      <div id="toast" class="toast" hidden></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl/dist/maplibre-gl.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
