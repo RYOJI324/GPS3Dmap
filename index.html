@@ -1,24 +1,83 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Adventure Note</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Adventure Note</title>
 
-<link href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css" rel="stylesheet"/>
-<script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@3.6.1/dist/maplibre-gl.js"></script>
 
-<link rel="stylesheet" href="style.css"/>
+  <!-- EXIF reader (for DateTimeOriginal / GPS) -->
+  <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div id="map"></div>
 
-<div id="map"></div>
+  <!-- Top bar -->
+  <div id="topBar">
+    <label class="fileBtn">
+      写真を読み込む
+      <input id="photoInput" type="file" accept="image/*" multiple />
+    </label>
 
-<button id="recordBtn">📍 現在地を記録</button>
-<button id="autoBtn">▶ 自動記録（3分間隔）</button>
-<input type="file" id="photoInput" multiple accept="image/*"/>
+    <button id="menuBtn" class="iconBtn" aria-label="メニュー">≡</button>
+  </div>
 
-<script src="app.js"></script>
+  <!-- Menu -->
+  <div id="menuPanel" class="panel hidden" role="dialog" aria-label="メニュー">
+    <div class="panelHeader">
+      <div class="panelTitle">メニュー</div>
+      <button id="menuCloseBtn" class="iconBtn" aria-label="閉じる">✕</button>
+    </div>
+
+    <div class="panelBody">
+      <div class="row">
+        <button id="exportJsonBtn" class="primary">JSON書き出し</button>
+        <label class="fileBtn secondary" style="justify-content:center;">
+          JSON読み込み
+          <input id="importJsonInput" type="file" accept="application/json,.json" />
+        </label>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="row">
+        <button id="clearBtn" class="danger">すべて消去（この端末）</button>
+      </div>
+
+      <p class="hint">
+        ※位置情報の取得にはHTTPSが必要です（GitHub Pages等）。<br>
+        ※自動記録はiOSの仕様上、画面を消したりバックグラウンドにすると止まることがあります。
+      </p>
+    </div>
+  </div>
+
+  <!-- Bottom controls -->
+  <button id="recordBtn" class="fab">📍 現在地を記録</button>
+
+  <div id="autoPanel">
+    <button id="autoToggleBtn" class="secondary">▶ 自動記録（3分）</button>
+    <select id="autoIntervalSel" aria-label="自動記録間隔">
+      <option value="60">1分</option>
+      <option value="180" selected>3分</option>
+      <option value="300">5分</option>
+    </select>
+  </div>
+
+  <!-- Timeline -->
+  <div id="timelineWrap">
+    <div id="timelineHeader">
+      <div class="title">タイムライン</div>
+      <div class="meta" id="timelineMeta">0件</div>
+    </div>
+    <div id="timeline" aria-label="タイムライン"></div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+
+  <script src="app.js"></script>
 </body>
 </html>
